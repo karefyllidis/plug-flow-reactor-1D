@@ -46,6 +46,8 @@ LUMPS = ["feedstock", "ethylene", "propylene", "methane", "hydrogen", "light_par
 #  _____________________________________________________________
 
 CONFIG = Path(sys.argv[1]) if len(sys.argv) > 1 else _ROOT / "pfr_hexane.json"
+if CONFIG.suffix != ".json" or not CONFIG.is_file():
+    sys.exit(f"usage: python pfr_runner.py [config.json]   (e.g. pfr_hexane.json, pfr_air.json); got '{CONFIG}'")
 cfg = json.load(open(CONFIG))
 MODELS = cfg["models"]                         # "cantera", and RateNet exports by folder name under models/
 MECHANISM = _ROOT / cfg.get("mechanism", "mechanism/n-Hexane_Kinetic-Model_species_153.yaml")
