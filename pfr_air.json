@@ -12,7 +12,7 @@
     "wall_htc_Wm2K": "gnielinski",
     "_wall_friction": "Darcy friction in the momentum equation: Petukhov, laminar 64/Re",
     "wall_friction": true,
-    "n_cells": 1000,
+    "n_cells": 2000,
     "output_dir": "outputs",
     "_wall_temperature_profile": "wall T(x), Main_1 knot format: position relative 0..1, 'step' holds the knot value to the next knot, 'linear' ramps to it",
     "wall_temperature_profile": [
