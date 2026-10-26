@@ -1,7 +1,8 @@
-# plug-flow-reactor-1D — n-hexane PFR reference for TBLOCK
+# plug-flow-reactor-1D — PFR reference for TBLOCK
 
-A stand-alone 1-D plug-flow reactor for n-hexane steam cracking. It is the reference for validating the
-reacting TBLOCK runs (`09 tblock-cfd/tblock`, `RATENET 1/2`) on a straight duct. It takes after
+A stand-alone 1-D plug-flow reactor for n-hexane steam cracking, or for air heated by the walls. It is the
+reference for validating TBLOCK (`09 tblock-cfd/tblock`) on a straight duct: the reacting runs (`RATENET 1/2`)
+and heated-wall air runs. It takes after
 `GeneralizedPFR/Main_1_run_pfr.py` but keeps everything in one script and one config, with no imports from
 other repos.
 
@@ -11,21 +12,21 @@ Nikolas Karefyllidis, PhD
 
 ```powershell
 pip install -r requirements.txt
-python pfr_hexane.py                 # reads pfr_hexane.json
-python pfr_hexane.py my_case.json    # another config
+python pfr_runner.py                 # reads pfr_hexane.json (n-hexane)
+python pfr_runner.py pfr_air.json    # air heated by the walls
 ```
 
-The script writes these files to `outputs/`:
+The script writes these files to `outputs/`, named after the config file (`<config>`):
 
 | File | Content |
 |---|---|
-| `pfr_hexane_cantera.csv` | detailed mechanism, species summed into the 13 lumps |
-| `pfr_hexane_ratenet.csv` | the RateNet closure (`models/ratenet/`) |
-| `pfr_hexane.png` | against residence time: T (and wall T), p, u, molar mass, cp, gamma, laminar viscosity, conversion, wall heat flux |
-| `pfr_hexane_lumps.png` | all 13 lumps against x, both models |
+| `<config>_<model>.csv` | one per model: `cantera` (species summed into the 13 lumps), `ratenet`, `air` |
+| `<config>.png` | against residence time: T (and wall T), p, u, molar mass, cp, gamma, laminar viscosity, Re, htc, wall heat flux, Mach, conversion |
+| `<config>_lumps.png` | all 13 lumps against x (hexane models only) |
 
-CSV columns: `x_m t_s T_K TW_K QW_Wm2 P_Pa U_ms RHO_kgm3 W_kgkmol CP_JkgK GAMMA MU_Pas MACH CONV
-Y_feedstock ... Y_diluent`. `CONV` and the `Y_<lump>` names match TBLOCK's 1-D file (`1DPavg4tec`).
+CSV columns: `x_m t_s T_K TW_K QW_Wm2 HTC_Wm2K RE F_DARCY P_Pa U_ms RHO_kgm3 W_kgkmol CP_JkgK GAMMA MU_Pas
+MACH`, then for hexane `CONV Y_feedstock ... Y_diluent`. `CONV` and the `Y_<lump>` names match TBLOCK's 1-D
+file (`1DPavg4tec`).
 
 ## TBLOCK validation case (the default `pfr_hexane.json`)
 
@@ -90,18 +91,34 @@ same closure. Against the `cantera` CSV it also tests the chemistry, to the accu
 
 ## Model
 
-A steady, constant-area, inviscid tube of diameter D. The gas enters at `inlet_T_K` and is heated by a
-**prescribed wall temperature Tw(x)** through a heat-transfer coefficient:
+A steady, constant-area tube of diameter D. The gas enters at `inlet_T_K` and is heated by a **prescribed
+wall temperature Tw(x)** through a heat-transfer coefficient:
 
 ```
 rho u = G                              continuity
-p + G u = C                            momentum
+d(p + G u)/dx = -f G u / (2 D)         momentum (f = 0 unless wall_friction)
 G d(h + u^2/2)/dx = 4 q_w / D          energy (h includes the formation enthalpies)
 q_w = htc (Tw - T)                     wall heat flux
 u dY_k/dx = omega_k                    species
 ```
 
-With `wall_htc_Wm2K` 0 the duct is adiabatic: the gas cools as it cracks.
+- `wall_htc_Wm2K` is a number, or `"gnielinski"`: Nu from the local Re and Pr (laminar, Re < 2300: Nu 3.66),
+  htc = Nu k / D. It is fully developed, with no entrance-length or wall-to-bulk property correction.
+  It needs a thermal conductivity, so `cantera` and `air` only.
+- With `wall_htc_Wm2K` 0 the duct is adiabatic, and the hexane gas cools as it cracks.
+- `wall_friction`: Darcy f from Petukhov, `(0.790 ln Re - 1.64)^-2` (laminar 64/Re).
+
+The default air case (`pfr_air.json`): 300 K, 2 bar, 50 m/s into a 30 mm, 5 m tube with an 800 K wall,
+Gnielinski heat transfer and friction. It leaves at 697.7 K, 1.739 bar, 133.7 m/s (Mach 0.26) after 54.8 ms.
+Re falls from 1.9e5 to 1.0e5 as the air heats; the mean htc is 295 W/m2/K.
+
+Checks on the air model (2 m version of that case):
+
+- At constant htc without friction, T(x) matches the closed form `Tw - (Tw - T0) exp(-4 htc x / (G D cp))`
+  within 2 K. The closed form uses a mean cp, while the model uses cp(T).
+- Without heating, the friction pressure drop is 4 % above Darcy-Weisbach, as it should be: the gas
+  accelerates (Fanno flow).
+- 1000 and 4000 cells agree to 0.03 K.
 
 The march is cell by cell, following a Lagrangian parcel:
 
@@ -109,21 +126,22 @@ The march is cell by cell, following a Lagrangian parcel:
 2. The wall heat is added to the total enthalpy.
 3. T, p and u are solved from total enthalpy, momentum and the ideal-gas law (Newton on u, subsonic branch).
 
-The script stops if the flow reaches Mach 1 (thermal choking). The march is first order in dx: raise
+The script stops if the flow reaches Mach 1 (thermal or friction choking). The march is first order in dx: raise
 `n_cells` until the result stops changing. On the isothermal test, 500 and 2000 cells agreed to 4 digits.
 
-Laminar viscosity (output only; the inviscid model does not use it):
+Laminar viscosity, used by Re, the correlations and the output:
 
-- `cantera`: the mixture-averaged viscosity from the mechanism's transport data.
+- `cantera`, `air`: the mixture-averaged viscosity from the mechanism's transport data.
 - `ratenet`: TBLOCK's law, `mu = tblock_mu288_Pas (T/288)^0.62` (deck `REYNO -1.256E-05`). The lumps carry
   no transport data.
 
-### Two chemistries, same equations
+### Gas models, same equations
 
 | `models` | What it is |
 |---|---|
 | `cantera` | `mechanism/n-Hexane_Kinetic-Model_species_153.yaml`, the mechanism RateNet was trained on, integrated with Cantera (CVODES). Species are summed into the hybrid13 lumps for output. |
 | `ratenet` | the RateNet closure as TBLOCK runs it: 13 hybrid13 lumps, rates from `models/ratenet/ratenet.txt`, lump gas from `lump_thermo.txt`. It applies the same clamps, zero-lump guard and sum-zero projection as `ratenet_tb_omega`. Any other name in `models` is read as a RateNet export folder under `models/`. |
+| `air` | Cantera `air.yaml` (`air_composition`, default O2 0.21 / N2 0.79 by mole), chemistry frozen, NASA thermo and mixture-averaged transport. |
 
 How to read the comparison:
 
@@ -133,15 +151,17 @@ How to read the comparison:
 When `ratenet` loads, the network checks itself against the check vectors in `ratenet.txt` and stops if
 they disagree.
 
-## Config (`pfr_hexane.json`)
+## Config (`pfr_hexane.json`, `pfr_air.json`)
 
 | Key | Meaning |
 |---|---|
-| `models` | `"cantera"` and RateNet export folders under `models/`, e.g. `["cantera", "ratenet"]` |
-| `steam_ratio_kg_per_kg` | kg steam per kg n-hexane (RateNet trained at 0.40-0.60) |
+| `models` | `"cantera"`, `"air"`, and RateNet export folders under `models/`, e.g. `["cantera", "ratenet"]` |
+| `steam_ratio_kg_per_kg` | kg steam per kg n-hexane (RateNet trained at 0.40-0.60); hexane only |
+| `air_composition` | mole fractions of the `air` model |
 | `inlet_T_K`, `inlet_p_Pa`, `inlet_u_ms` | static inlet temperature, pressure and velocity |
 | `length_m`, `diameter_m`, `n_cells` | tube length, diameter and number of march cells |
-| `wall_htc_Wm2K` | gas-wall heat transfer coefficient, constant along the tube (0 = adiabatic) |
+| `wall_htc_Wm2K` | gas-wall heat transfer coefficient: a number [W/m2/K] (0 = adiabatic), or `"gnielinski"` |
+| `wall_friction` | `true`: Darcy friction in the momentum equation (default `false`) |
 | `wall_temperature_profile` | Tw(x) knots in Main_1's format: `position` relative 0..1, `temperature_K`, `interpolation_to_next` `linear` or `step` |
 | `tblock_mu288_Pas` | TBLOCK's laminar viscosity at 288 K, used for the `ratenet` viscosity output |
 
@@ -173,8 +193,9 @@ and the 2-D repo together.
 ## Layout
 
 ```
-pfr_hexane.py        the model
-pfr_hexane.json      the input (the TBLOCK validation case)
+pfr_runner.py        the model
+pfr_hexane.json      n-hexane input (the TBLOCK reacting validation case)
+pfr_air.json         air input (heated wall, Gnielinski, friction)
 refit_lump_thermo.py optional lump-thermo refit for a future RateNet export
 mechanism/           n-hexane mechanism (153 species)
 models/ratenet/      RateNet network (checkpoint c321788e) + lump thermo

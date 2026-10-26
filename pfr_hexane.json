@@ -1,5 +1,5 @@
 {
-    "_comment": "Input of pfr_hexane.py. RateNet (c321788e) envelope: T <= 1601 K (dense 495-1182 K), p 1-4 bar, rho 0.16-19 kg/m3, steam ratio 0.40-0.60",
+    "_comment": "Input of pfr_runner.py. RateNet (c321788e) envelope: T <= 1601 K (dense 495-1182 K), p 1-4 bar, rho 0.16-19 kg/m3, steam ratio 0.40-0.60",
     "_case": "TBLOCK validation duct for RateNet c321788e: adiabatic (TBLOCK has no isothermal walls with the lump gas), T_in 1150 K, 2 bar, 100 m/s (M 0.2), 3 m = ~30 ms. Best of the adiabatic sweep (README)",
     "_models": "cantera = detailed mechanism; any other name = a RateNet export folder under models/",
     "models": [
