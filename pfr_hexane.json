@@ -1,0 +1,35 @@
+{
+    "_comment": "Input of pfr_hexane.py. RateNet (c321788e) envelope: T <= 1601 K (dense 495-1182 K), p 1-4 bar, rho 0.16-19 kg/m3, steam ratio 0.40-0.60",
+    "_case": "TBLOCK validation duct for RateNet c321788e: adiabatic (TBLOCK has no isothermal walls with the lump gas), T_in 1150 K, 2 bar, 100 m/s (M 0.2), 3 m = ~30 ms. Best of the adiabatic sweep (README)",
+    "_models": "cantera = detailed mechanism; any other name = a RateNet export folder under models/",
+    "models": [
+        "cantera",
+        "ratenet"
+    ],
+    "mechanism": "mechanism/n-Hexane_Kinetic-Model_species_153.yaml",
+    "feed_species": "C6H14(1)",
+    "diluent_species": "Water",
+    "steam_ratio_kg_per_kg": 0.5,
+    "inlet_T_K": 1150.0,
+    "inlet_p_Pa": 200000.0,
+    "inlet_u_ms": 100.0,
+    "length_m": 3.0,
+    "diameter_m": 0.03,
+    "_wall_htc_Wm2K": "gas-wall heat transfer coefficient, constant; 0 = adiabatic duct",
+    "wall_htc_Wm2K": 0.0,
+    "tblock_mu288_Pas": 1.256e-05,
+    "n_cells": 1000,
+    "output_dir": "outputs",
+    "_wall_temperature_profile": "wall T(x), Main_1 knot format: position relative 0..1, 'step' holds the knot value to the next knot, 'linear' ramps to it; unused when wall_htc_Wm2K is 0",
+    "wall_temperature_profile": [
+        {
+            "position": 0.0,
+            "temperature_K": 1200.0,
+            "interpolation_to_next": "linear"
+        },
+        {
+            "position": 1.0,
+            "temperature_K": 1200.0
+        }
+    ]
+}
