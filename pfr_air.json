@@ -6,7 +6,7 @@
     "inlet_T_K": 300.0,
     "inlet_p_Pa": 200000.0,
     "inlet_u_ms": 50.0,
-    "length_m": 5.0,
+    "length_m": 3.0,
     "diameter_m": 0.03,
     "_wall_htc_Wm2K": "a number [W/m2/K], 0 = adiabatic, or \"gnielinski\" (local Re and Pr, fully developed; laminar Nu 3.66)",
     "wall_htc_Wm2K": "gnielinski",
