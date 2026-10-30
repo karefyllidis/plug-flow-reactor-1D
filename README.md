@@ -14,6 +14,8 @@ Nikolas Karefyllidis, PhD
 pip install -r requirements.txt
 python pfr_runner.py                 # reads pfr_hexane.json (n-hexane)
 python pfr_runner.py pfr_air.json    # air heated by the walls
+python pfr_runner.py pfr_air_adiabatic.json   # the same pipe, unheated
+python pfr_runner.py pfr_air_square.json      # heated square duct, 2 m (TBLOCK SQUARE_HEATED)
 ```
 
 The script writes these files to `outputs/`, named after the config file (`<config>`):
@@ -91,7 +93,8 @@ same closure. Against the `cantera` CSV it also tests the chemistry, to the accu
 
 ## Model
 
-A steady, constant-area tube of diameter D. The gas enters at `inlet_T_K` and is heated by a **prescribed
+A steady, constant-area tube of diameter D, or a square duct (`"cross_section": "square"`, 30 Oct 2026: D =
+`diameter_m` is then the side, which is the hydraulic diameter 4A/P). The gas enters at `inlet_T_K` and is heated by a **prescribed
 wall temperature Tw(x)** through a heat-transfer coefficient:
 
 ```
@@ -102,15 +105,27 @@ q_w = htc (Tw - T)                     wall heat flux
 u dY_k/dx = omega_k                    species
 ```
 
-- `wall_htc_Wm2K` is a number, or `"gnielinski"`: Nu from the local Re and Pr (laminar, Re < 2300: Nu 3.66),
+- `wall_htc_Wm2K` is a number, or `"gnielinski"`: Nu from the local Re and Pr (laminar, Re < 2300: Nu 3.66; square
+  duct 2.98),
   htc = Nu k / D. It is fully developed, with no entrance-length or wall-to-bulk property correction.
   It needs a thermal conductivity, so `cantera` and `air` only.
 - With `wall_htc_Wm2K` 0 the duct is adiabatic, and the hexane gas cools as it cracks.
-- `wall_friction`: Darcy f from Petukhov, `(0.790 ln Re - 1.64)^-2` (laminar 64/Re).
+- `wall_friction`: Darcy f from Petukhov, `(0.790 ln Re - 1.64)^-2` (laminar 64/Re; square duct 56.91/Re).
+- A square duct uses the same equations on its hydraulic diameter: 4/D is its perimeter over its area, and the
+  turbulent correlations take D_h as they are. Only the laminar constants and the mass flow (G a^2 instead of
+  G pi D^2/4) differ, so a turbulent square duct gives the pipe's T, p and u.
 
-The default air case (`pfr_air.json`): 300 K, 2 bar, 50 m/s into a 30 mm, 5 m tube with an 800 K wall,
-Gnielinski heat transfer and friction. It leaves at 697.7 K, 1.739 bar, 133.7 m/s (Mach 0.26) after 54.8 ms.
-Re falls from 1.9e5 to 1.0e5 as the air heats; the mean htc is 295 W/m2/K.
+The air cases (30 Oct 2026; 300 K, 2 bar, 50 m/s inlet, Gnielinski heat transfer and Petukhov friction):
+
+| Config | Duct | Exit T | Exit p | Exit u | Mach | Residence | htc | TBLOCK deck |
+|---|---|---|---|---|---|---|---|---|
+| `pfr_air.json` | pipe D 30 mm, 3 m, 800 K wall | 604.1 K | 1.8513 bar | 108.77 m/s | 0.222 | 38.27 ms | 285 W/m2/K | `PIPE_HEATED.dat` |
+| `pfr_air_adiabatic.json` | the same pipe, adiabatic (Fanno) | 299.9 K | 1.9523 bar | 51.21 m/s | 0.147 | 59.29 ms | 0 | `PIPE_ADIABATIC.dat` |
+| `pfr_air_square.json` | square duct a 30 mm, 2 m, 800 K wall | 530.0 K | 1.9036 bar | 92.80 m/s | 0.202 | 28.35 ms | 278 W/m2/K | `SQUARE_HEATED.dat` |
+
+Re falls from 1.86e5 to 1.13e5 along the heated pipe (1.24e5 in the shorter duct). The mass flow is 0.081758 kg/s in
+the pipe and 0.104098 kg/s in the square duct. The 5 m pipe of 27 Oct 2026 (697.7 K, 1.739 bar) is
+`outputs/pfr_air_air_5m.csv`.
 
 Checks on the air model (2 m version of that case):
 
@@ -151,7 +166,7 @@ How to read the comparison:
 When `ratenet` loads, the network checks itself against the check vectors in `ratenet.txt` and stops if
 they disagree.
 
-## Config (`pfr_hexane.json`, `pfr_air.json`)
+## Config (`pfr_hexane.json`, `pfr_air*.json`)
 
 | Key | Meaning |
 |---|---|
@@ -159,7 +174,8 @@ they disagree.
 | `steam_ratio_kg_per_kg` | kg steam per kg n-hexane (RateNet trained at 0.40-0.60); hexane only |
 | `air_composition` | mole fractions of the `air` model |
 | `inlet_T_K`, `inlet_p_Pa`, `inlet_u_ms` | static inlet temperature, pressure and velocity |
-| `length_m`, `diameter_m`, `n_cells` | tube length, diameter and number of march cells |
+| `length_m`, `diameter_m`, `n_cells` | tube length, diameter (the side of a square duct) and number of march cells |
+| `cross_section` | `"circle"` (default) or `"square"` |
 | `wall_htc_Wm2K` | gas-wall heat transfer coefficient: a number [W/m2/K] (0 = adiabatic), or `"gnielinski"` |
 | `wall_friction` | `true`: Darcy friction in the momentum equation (default `false`) |
 | `wall_temperature_profile` | Tw(x) knots in Main_1's format: `position` relative 0..1, `temperature_K`, `interpolation_to_next` `linear` or `step` |
@@ -196,6 +212,8 @@ and the 2-D repo together.
 pfr_runner.py        the model
 pfr_hexane.json      n-hexane input (the TBLOCK reacting validation case)
 pfr_air.json         air input (heated wall, Gnielinski, friction)
+pfr_air_adiabatic.json  the same air pipe unheated (adiabatic wall, friction: Fanno flow)
+pfr_air_square.json  air in a heated square duct, side 30 mm, 2 m
 refit_lump_thermo.py optional lump-thermo refit for a future RateNet export
 mechanism/           n-hexane mechanism (153 species)
 models/ratenet/      RateNet network (checkpoint c321788e) + lump thermo

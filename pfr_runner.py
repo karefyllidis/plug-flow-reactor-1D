@@ -2,13 +2,15 @@
 # Stand-alone 1-D plug-flow reactor (n-hexane steam cracking, or air) — reference for TBLOCK validation
 # N. Karefyllidis 2026
 #
-# Steady, constant-area tube of diameter D heated by a prescribed wall temperature Tw(x):
+# Steady, constant-area tube of diameter D heated by a prescribed wall temperature Tw(x); a square duct with
+# "cross_section": "square" (D = diameter_m is then the side, the hydraulic diameter 4A/P; 30 Oct 2026):
 #     rho u = G                                   continuity
 #     d(p + G u)/dx = -f G u / (2 D)              momentum, Darcy f (0 unless wall_friction)
 #     G d(h + u^2/2)/dx = 4 q_w / D               energy, h with the formation enthalpies
 #     q_w = htc (Tw - T)                          wall heat flux [W/m2]
 #     u dY_k/dx = omega_k                         species [1/s]
-# htc is a constant or "gnielinski" (local Re, Pr; laminar Nu 3.66), f is Petukhov (laminar 64/Re);
+# htc is a constant or "gnielinski" (local Re, Pr; laminar Nu 3.66, square 2.98), f is Petukhov (laminar 64/Re,
+# square 56.91/Re); the turbulent correlations take the hydraulic diameter as they are;
 # htc = 0 is the adiabatic duct. Marched cell by cell as a Lagrangian parcel: each cell integrates the
 # chemistry at the cell-inlet T and p for dt = dx/u, adds the wall heat, then solves T, p, u from the
 # total enthalpy, momentum and the ideal gas (Newton on u, subsonic branch).
@@ -59,6 +61,8 @@ LENGTH, DIAMETER, N_CELLS = cfg["length_m"], cfg["diameter_m"], cfg["n_cells"]
 MU_288 = cfg.get("tblock_mu288_Pas", 1.256e-5)  # TBLOCK laminar viscosity at 288 K, mu = MU_288 (T/288)^0.62
 HTC = cfg["wall_htc_Wm2K"]                     # W/m2/K, or "gnielinski"
 FRICTION = cfg.get("wall_friction", False)
+SQUARE = cfg.get("cross_section", "circle") == "square"   # diameter_m = the side (hydraulic diameter)
+NU_LAM, F_LAM = (2.98, 56.91) if SQUARE else (3.66, 64.0)    # fully developed laminar, constant wall T
 OUT_DIR = _ROOT / cfg["output_dir"]
 KNOTS = cfg["wall_temperature_profile"]
 
@@ -296,12 +300,12 @@ def wall(chem, Y, T, G):
     """htc [W/m2/K], Darcy f and Re at a state: Gnielinski / Petukhov, laminar Nu 3.66 / 64/Re."""
     mu = chem.mu(Y, T)
     Re = G * DIAMETER / mu
-    f = 64.0 / Re if Re < 2300 else (0.790 * np.log(Re) - 1.64) ** -2
+    f = F_LAM / Re if Re < 2300 else (0.790 * np.log(Re) - 1.64) ** -2
     if HTC == "gnielinski":
         # ponytail: fully developed, no entrance-length or property-ratio correction
         k = chem.k(Y, T)
         Pr = chem.thermo(Y, T)[1] * mu / k
-        Nu = 3.66 if Re < 2300 else max(3.66, f / 8 * (Re - 1000) * Pr / (1 + 12.7 * np.sqrt(f / 8) * (Pr ** (2 / 3) - 1)))
+        Nu = NU_LAM if Re < 2300 else max(NU_LAM, f / 8 * (Re - 1000) * Pr / (1 + 12.7 * np.sqrt(f / 8) * (Pr ** (2 / 3) - 1)))
         htc = Nu * k / DIAMETER
     else:
         htc = HTC

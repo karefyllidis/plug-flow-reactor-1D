@@ -1,0 +1,33 @@
+{
+    "_comment": "Input of pfr_runner.py for air in a heated square duct (no chemistry). python pfr_runner.py pfr_air_square.json",
+    "_case": "pfr_air.json (2 m long) in a square duct of side 30 mm (hydraulic diameter 30 mm): air at 300 K, 2 bar, 50 m/s, 800 K walls, Gnielinski and Petukhov on the hydraulic diameter",
+    "cross_section": "square",
+    "_cross_section": "circle (default) or square; for a square, diameter_m is the side (= the hydraulic diameter)",
+    "models": [
+        "air"
+    ],
+    "air_composition": "O2:0.21, N2:0.79",
+    "inlet_T_K": 300.0,
+    "inlet_p_Pa": 200000.0,
+    "inlet_u_ms": 50.0,
+    "length_m": 2.0,
+    "diameter_m": 0.03,
+    "_wall_htc_Wm2K": "a number [W/m2/K], 0 = adiabatic, or \"gnielinski\" (local Re and Pr, fully developed; laminar Nu 3.66)",
+    "wall_htc_Wm2K": "gnielinski",
+    "_wall_friction": "Darcy friction in the momentum equation: Petukhov, laminar 64/Re",
+    "wall_friction": true,
+    "n_cells": 2000,
+    "output_dir": "outputs",
+    "_wall_temperature_profile": "wall T(x), Main_1 knot format: position relative 0..1, 'step' holds the knot value to the next knot, 'linear' ramps to it",
+    "wall_temperature_profile": [
+        {
+            "position": 0.0,
+            "temperature_K": 800.0,
+            "interpolation_to_next": "linear"
+        },
+        {
+            "position": 1.0,
+            "temperature_K": 800.0
+        }
+    ]
+}
