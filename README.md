@@ -16,6 +16,8 @@ python pfr_runner.py                 # reads pfr_hexane.json (n-hexane)
 python pfr_runner.py pfr_air.json    # air heated by the walls
 python pfr_runner.py pfr_air_adiabatic.json   # the same pipe, unheated
 python pfr_runner.py pfr_air_square.json      # heated square duct, 2 m (TBLOCK SQUARE_HEATED)
+python pfr_runner.py pfr_vangeem2006.json     # n-hexane pilot-coil experiment (Van Geem et al. 2006)
+python pfr_vangeem2006_profiles.py            # that experiment for five assumed temperature profiles (two figures)
 ```
 
 The script writes these files to `outputs/`, named after the config file (`<config>`):
@@ -25,6 +27,7 @@ The script writes these files to `outputs/`, named after the config file (`<conf
 | `<config>_<model>.csv` | one per model: `cantera` (species summed into the 13 lumps), `ratenet`, `air` |
 | `<config>.png` | against residence time: T (and wall T), p, u, molar mass, cp, gamma, laminar viscosity, Re, htc, wall heat flux, Mach, conversion |
 | `<config>_lumps.png` | all 13 lumps against x (hexane models only) |
+| `<config>_yields.csv`, `.png` | outlet yields in wt% of the feed, by formula, one column per model and one for the experiment (hexane models only); the bar chart leaves out the unconverted feed and gives the conversions in its title |
 
 CSV columns: `x_m t_s T_K TW_K QW_Wm2 HTC_Wm2K RE F_DARCY P_Pa U_ms RHO_kgm3 W_kgkmol CP_JkgK GAMMA MU_Pas
 MACH`, then for hexane `CONV Y_feedstock ... Y_diluent`. `CONV` and the `Y_<lump>` names match TBLOCK's 1-D
@@ -150,12 +153,88 @@ Laminar viscosity, used by Re, the correlations and the output:
 - `ratenet`: TBLOCK's law, `mu = tblock_mu288_Pas (T/288)^0.62` (deck `REYNO -1.256E-05`). The lumps carry
   no transport data.
 
+### Pilot-coil mode: measured gas temperature and pressure (17 Nov 2026)
+
+For validation against a pilot-plant coil, where the process-gas temperature and the pressure are measured
+along the tube and the wall heat flux is not known:
+
+- `gas_temperature_profile` imposes the gas T(x). It replaces the energy equation, so `wall_htc_Wm2K` and
+  `wall_temperature_profile` are not needed. The knots have the wall profile's format.
+- `pressure_profile` (knots with `pressure_Pa`) imposes p(x) as well and replaces the momentum equation; the
+  velocity is then `u = G R T / p`. Without it, p comes from the momentum equation as before (with
+  `wall_friction` if set).
+- The inlet state is the first knot of each profile, so `inlet_T_K` (and `inlet_p_Pa` with a pressure profile)
+  are not read.
+- `mass_flow_kgs` (feed + steam) sets the inlet velocity in place of `inlet_u_ms`.
+- `experiment_yields_wtpct`, e.g. `{"C2H4": 30.1, "C3H6": 17.2}`, is printed beside the models and written to
+  `<config>_yields.csv`.
+
+Yields are outlet mass per mass of n-hexane fed, in wt%, summed by formula: the mechanism names isomers by index
+only (`C4H6(4)`, `C4H6(217)`, ...), so `C4H6` is all of them, and `C6H14` is the unconverted feed. `ratenet`
+only has the lumps that are one molecule: C6H14, C2H4, C3H6, CH4 and H2.
+
+In this mode `QW_Wm2` is the heat the wall had to supply, from the enthalpy balance
+`G D/4 d(h + u^2/2)/dx`, and `TW_K` is empty (the wall temperature is not solved).
+
+Checks, each imposing the profiles of an earlier run on the same grid:
+
+- T(x) and p(x) of the default hexane case reproduce it: every column to 2e-15 with `ratenet`, to 7e-10 with
+  `cantera`. The balance returns its adiabatic wall, |QW| below 1e-6 W/m2.
+- T(x) alone reproduces the pressure through the momentum equation, to 1e-14, for the hexane case and for
+  `pfr_air.json` with friction.
+- For `pfr_air.json`, QW from the enthalpy balance matches `htc (Tw - T)` within 0.02 %.
+- The existing configs give the same CSVs as before the change, to the last digit.
+
+## Experimental validation case (`pfr_vangeem2006.json`, 17 Nov 2026)
+
+n-Hexane steam cracking in the Ghent LPT pilot coil: Van Geem, Reyniers, Marin, Song, Matheu, Green, AIChE J.
+52, 718-730 (2006). The journal paper is behind a paywall; the numbers here are from K. Van Geem's PhD thesis,
+which carries the same work and is open (Ghent University 2006, `biblio.ugent.be/publication/470983`): Tables
+2.5 and 2.6, and the pilot plant in section 4.5.
+
+| | |
+|---|---|
+| Coil | reaction section 12.4 m, internal diameter 9 mm (section 4.5; chapter 2 says "d = 10 mm" in passing) |
+| Instruments | 20 thermocouples in the process gas, 5 manometers along the coil, 7 furnace cells |
+| The run (Table 2.6) | coil inlet 873 K, outlet 997 K, 0.27 to 0.24 MPa, n-hexane 4.0 kg/h, steam 0.4 kg/kg |
+| Measured | conversion 51.5 %, yields of 12 products |
+| The other nine runs | only as ranges (outlet 953-1075 K, 3.0-4.0 kg/h, conversion 25-75 %) and parity plots |
+
+**The thermocouple readings are not printed.** The thesis simulated with the measured T(x) and p(x) imposed
+(CHEMKIN PLUG) and reached 50.9 %, but gives only the inlet and outlet values. The config assumes straight
+lines between them, and the conversion depends strongly on that assumption. With
+`T = T_in + (T_out - T_in) (1 - exp(-a x/L)) / (1 - exp(-a))` (a = 0 is the straight line; at a = 8 the gas is
+within 3 K of the outlet temperature from mid-coil on), `cantera`:
+
+| Profile | Conversion | CH4 | C2H4 | C2H6 | C3H6 | C4H6 | C4H8 | C5H10 | H2 |
+|---|---|---|---|---|---|---|---|---|---|
+| a = 0 (the config) | 28.7 % | 3.62 | 9.34 | 1.32 | 7.07 | 0.47 | 4.09 | 2.00 | 0.14 |
+| a = 4 | 44.7 % | 5.91 | 15.63 | 2.10 | 11.24 | 1.24 | 5.38 | 2.03 | 0.21 |
+| a = 8 | 51.0 % | 6.87 | 18.32 | 2.40 | 12.90 | 1.67 | 5.68 | 1.88 | 0.24 |
+| **Experiment** | **51.5 %** | 5.6 | 19.3 | 3.3 | 10.8 | 2.7 | 6.2 | 2.2 | 0.4 |
+
+Yields in wt% of the n-hexane fed. C4H8 is 1-butene plus 2-butene; the measured C5H10 is 1-pentene only.
+`pfr_vangeem2006_profiles.py` reruns this table (a = 0, 2, 4, 6, 8) and writes
+`outputs/pfr_vangeem2006_profiles.png` (the profiles and the conversion along the coil) and
+`outputs/pfr_vangeem2006_selectivity.png` (ethylene, propylene and methane against conversion, with the
+measured points).
+
+- The conversion is not validated: the mechanism reaches the measured 51.5 % only if the gas sits at the outlet
+  temperature for most of the coil. Either the real profile is that flat (or peaks above the outlet value), or
+  the mechanism is slow near 1000 K. The thermocouple readings would settle it.
+- At matched conversion (a = 8) the product split can be compared: ethylene -5 %, propylene +19 %, methane
+  +23 %, ethane -27 %, butadiene -38 %.
+- A 10 mm tube gives 32.0 % instead of 28.7 % (straight line). 2000 cells give 28.70 % against 28.69 %.
+- `v1.1` follows `cantera` here: 30.0 % against 28.7 %, ethylene 9.61 against 9.34. The older `ratenet`
+  (epoch 40) gives 83 %: it is not usable at these temperatures and residence times (0.66 s).
+
 ### Gas models, same equations
 
 | `models` | What it is |
 |---|---|
 | `cantera` | `mechanism/n-Hexane_Kinetic-Model_species_153.yaml`, the mechanism RateNet was trained on, integrated with Cantera (CVODES). Species are summed into the hybrid13 lumps for output. |
 | `ratenet` | the RateNet closure as TBLOCK runs it: 13 hybrid13 lumps, rates from `models/ratenet/ratenet.txt`, lump gas from `lump_thermo.txt`. It applies the same clamps, zero-lump guard and sum-zero projection as `ratenet_tb_omega`. Any other name in `models` is read as a RateNet export folder under `models/`. |
+| `v1.1` | ReactionRateNET v1.1 (`models/v1.1/`, checkpoint `da16424d`, epoch 250 of 250, `ratenet_export v2` with asinh targets): 12 lumps, the 13 without `heavies`, which is in its `aromatics`. Envelope 700-1861 K, 0.85-4 bar, steam ratio from 0.40. On the default hexane case: CONV 0.3354 against Cantera's 0.3338, Y_ethylene 0.0840 against 0.0839. |
 | `air` | Cantera `air.yaml` (`air_composition`, default O2 0.21 / N2 0.79 by mole), chemistry frozen, NASA thermo and mixture-averaged transport. |
 
 How to read the comparison:
@@ -174,9 +253,13 @@ they disagree.
 | `steam_ratio_kg_per_kg` | kg steam per kg n-hexane (RateNet trained at 0.40-0.60); hexane only |
 | `air_composition` | mole fractions of the `air` model |
 | `inlet_T_K`, `inlet_p_Pa`, `inlet_u_ms` | static inlet temperature, pressure and velocity |
+| `mass_flow_kgs` | total mass flow, feed + steam [kg/s]; sets the inlet velocity in place of `inlet_u_ms` |
+| `gas_temperature_profile` | imposed gas T(x), knots as `wall_temperature_profile`; replaces the energy equation (pilot-coil mode) |
+| `pressure_profile` | imposed p(x), knots with `pressure_Pa`; needs `gas_temperature_profile`; replaces the momentum equation |
+| `experiment_yields_wtpct` | measured outlet yields by formula, wt% of the feed, for the yields table |
 | `length_m`, `diameter_m`, `n_cells` | tube length, diameter (the side of a square duct) and number of march cells |
 | `cross_section` | `"circle"` (default) or `"square"` |
-| `wall_htc_Wm2K` | gas-wall heat transfer coefficient: a number [W/m2/K] (0 = adiabatic), or `"gnielinski"` |
+| `wall_htc_Wm2K` | gas-wall heat transfer coefficient: a number [W/m2/K] (0 = adiabatic, the default), or `"gnielinski"` |
 | `wall_friction` | `true`: Darcy friction in the momentum equation (default `false`) |
 | `wall_temperature_profile` | Tw(x) knots in Main_1's format: `position` relative 0..1, `temperature_K`, `interpolation_to_next` `linear` or `step` |
 | `tblock_mu288_Pas` | TBLOCK's laminar viscosity at 288 K, used for the `ratenet` viscosity output |
@@ -193,6 +276,10 @@ These files are copies. Re-copy them when the source changes:
   `07 RateNet/RateNet/models/RateNet/`, exported with
   `python scripts/export_fortran_weights.py --no-thermo -o <here>/models/ratenet/ratenet.txt`.
   Re-export when training finishes.
+- `models/v1.1/ratenet.txt` and `lump_thermo.txt`: copied on 17 Nov 2026 from
+  `tblock-x-nn/tblock/input/models/ratenet/` (TBLOCK's default model since 16 Nov 2026). The `RateNet` class
+  reads `ratenet_export` v1 and v2, as `tblock/scripts/chem/lump_of_phi.py` does, and takes the lump list from
+  the file. The default `pfr_hexane.json` and the tables above still use `models/ratenet` (c321788e).
 - `models/ratenet/lump_thermo.txt`: TBLOCK's, from the previous export. The thermo only depends on the lumps and
   the mechanism, which are unchanged. The matching export needs the training pickle, which is not on this machine.
 - The `RateNet` class comes from `tblock/scripts/chem/lump_of_phi.py`.
@@ -214,8 +301,11 @@ pfr_hexane.json      n-hexane input (the TBLOCK reacting validation case)
 pfr_air.json         air input (heated wall, Gnielinski, friction)
 pfr_air_adiabatic.json  the same air pipe unheated (adiabatic wall, friction: Fanno flow)
 pfr_air_square.json  air in a heated square duct, side 30 mm, 2 m
+pfr_vangeem2006.json n-hexane pilot-coil experiment (Van Geem et al. 2006), measured yields included
+pfr_vangeem2006_profiles.py  that experiment for five assumed temperature profiles: the sensitivity figures
 refit_lump_thermo.py optional lump-thermo refit for a future RateNet export
 mechanism/           n-hexane mechanism (153 species)
 models/ratenet/      RateNet network (checkpoint c321788e) + lump thermo
+models/v1.1/         ReactionRateNET v1.1 (checkpoint da16424d, 12 lumps) + lump thermo
 outputs/             results (git-ignored)
 ```

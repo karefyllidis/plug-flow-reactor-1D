@@ -1,0 +1,59 @@
+{
+    "_case": "Experiment: n-hexane steam cracking in the Ghent LPT pilot coil. Van Geem et al., AIChE J. 52, 718-730 (2006); numbers from K. Van Geem's PhD thesis (Ghent 2006, biblio.ugent.be/publication/470983), Table 2.6 and section 4.5",
+    "_run": "CIT 873 K, COT 997 K, CIP 0.27 MPa, COP 0.24 MPa, n-hexane 4.0 kg/h, steam 0.4 kg/kg; measured conversion 51.5 %",
+    "_geometry": "reaction section 12.4 m, internal diameter 9 mm (thesis section 4.5; its chapter 2 says 'd = 10 mm' in passing)",
+    "_models": "v1.1 = ReactionRateNET v1.1 (models/v1.1). The older models/ratenet (epoch 40) is far off at these conditions: 83 % conversion",
+    "models": [
+        "cantera",
+        "v1.1"
+    ],
+    "mechanism": "mechanism/n-Hexane_Kinetic-Model_species_153.yaml",
+    "feed_species": "C6H14(1)",
+    "diluent_species": "Water",
+    "steam_ratio_kg_per_kg": 0.4,
+    "_mass_flow_kgs": "4.0 kg/h n-hexane + 1.6 kg/h steam = 5.6 kg/h",
+    "mass_flow_kgs": 0.00155556,
+    "length_m": 12.4,
+    "diameter_m": 0.009,
+    "n_cells": 1000,
+    "output_dir": "outputs",
+    "_gas_temperature_profile": "ASSUMED linear from CIT to COT: the thesis simulated with the 20 measured thermocouple readings but does not print them",
+    "gas_temperature_profile": [
+        {
+            "position": 0.0,
+            "temperature_K": 873.0,
+            "interpolation_to_next": "linear"
+        },
+        {
+            "position": 1.0,
+            "temperature_K": 997.0
+        }
+    ],
+    "_pressure_profile": "ASSUMED linear from CIP to COP (5 manometers along the coil, readings not printed)",
+    "pressure_profile": [
+        {
+            "position": 0.0,
+            "pressure_Pa": 270000.0,
+            "interpolation_to_next": "linear"
+        },
+        {
+            "position": 1.0,
+            "pressure_Pa": 240000.0
+        }
+    ],
+    "_experiment_yields_wtpct": "thesis Table 2.6, wt% of the n-hexane fed. C6H14 = 100 - conversion 51.5; C4H8 = 1-butene 5.8 + 2-butene 0.4; C5H10 is 1-pentene only, the model sums all C5H10 isomers",
+    "experiment_yields_wtpct": {
+        "C6H14": 48.5,
+        "H2": 0.4,
+        "CH4": 5.6,
+        "C2H2": 0.3,
+        "C2H4": 19.3,
+        "C2H6": 3.3,
+        "C3H4": 0.2,
+        "C3H6": 10.8,
+        "C4H6": 2.7,
+        "C4H8": 6.2,
+        "C5H10": 2.2,
+        "C6H6": 0.1
+    }
+}

@@ -22,9 +22,13 @@
 #   air     : Cantera air.yaml, frozen (no chemistry), mixture-averaged transport
 # Comparing TBLOCK against `ratenet` checks the CFD; `ratenet` against `cantera` checks the closure.
 #
+# Pilot-coil mode, for experiments (17 Nov 2026): "gas_temperature_profile" imposes the measured process-gas
+# T(x) in place of the energy equation, "pressure_profile" the measured p(x) in place of the momentum equation,
+# "mass_flow_kgs" sets the inlet velocity; "experiment_yields_wtpct" goes beside the model in the yields table.
+#
 #     python pfr_runner.py [config.json]          (default pfr_hexane.json; pfr_air.json for the air case)
 # Writes <output_dir>/<config>_<model>.csv (TBLOCK 1-D names: CONV, Y_<lump>), <config>.png and, for the
-# hexane models, <config>_lumps.png (the 13 lumps).
+# hexane models, <config>_lumps.png (the 13 lumps) and <config>_yields.csv (outlet wt% of the feed by formula).
 
 import json
 import re
@@ -40,6 +44,7 @@ from scipy.integrate import solve_ivp
 _ROOT = Path(__file__).resolve().parent
 LUMPS = ["feedstock", "ethylene", "propylene", "methane", "hydrogen", "light_paraffins", "butenes",
          "heavy_olefins", "alkynes", "dienes", "aromatics", "heavies", "diluent"]
+SERIES = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4")   # yields chart: experiment, then the models, in this order
 
 # _____________________________________________________________
 #
@@ -56,25 +61,33 @@ MECHANISM = _ROOT / cfg.get("mechanism", "mechanism/n-Hexane_Kinetic-Model_speci
 FEED, DILUENT = cfg.get("feed_species", "C6H14(1)"), cfg.get("diluent_species", "Water")
 STEAM_RATIO = cfg.get("steam_ratio_kg_per_kg", 0.5)     # kg steam / kg n-hexane
 AIR = cfg.get("air_composition", "O2:0.21, N2:0.79")   # mole fractions
-T_0, P_0, U_0 = cfg["inlet_T_K"], cfg["inlet_p_Pa"], cfg["inlet_u_ms"]
+# Pilot-coil mode (17 Nov 2026): the measured process-gas T(x) replaces the energy equation, and with
+# pressure_profile the measured p(x) replaces the momentum equation; the inlet state is the first knot
+T_KNOTS, P_KNOTS = cfg.get("gas_temperature_profile"), cfg.get("pressure_profile")
+assert T_KNOTS or not P_KNOTS, "pressure_profile needs gas_temperature_profile"
+T_0 = T_KNOTS[0]["temperature_K"] if T_KNOTS else cfg["inlet_T_K"]
+P_0 = P_KNOTS[0]["pressure_Pa"] if P_KNOTS else cfg["inlet_p_Pa"]
+U_0, MDOT = cfg.get("inlet_u_ms"), cfg.get("mass_flow_kgs")   # one of the two; MDOT = feed + steam [kg/s]
 LENGTH, DIAMETER, N_CELLS = cfg["length_m"], cfg["diameter_m"], cfg["n_cells"]
 MU_288 = cfg.get("tblock_mu288_Pas", 1.256e-5)  # TBLOCK laminar viscosity at 288 K, mu = MU_288 (T/288)^0.62
-HTC = cfg["wall_htc_Wm2K"]                     # W/m2/K, or "gnielinski"
+HTC = cfg.get("wall_htc_Wm2K", 0.0)            # W/m2/K, or "gnielinski"
 FRICTION = cfg.get("wall_friction", False)
 SQUARE = cfg.get("cross_section", "circle") == "square"   # diameter_m = the side (hydraulic diameter)
 NU_LAM, F_LAM = (2.98, 56.91) if SQUARE else (3.66, 64.0)    # fully developed laminar, constant wall T
+AREA = DIAMETER**2 if SQUARE else np.pi * DIAMETER**2 / 4.0
 OUT_DIR = _ROOT / cfg["output_dir"]
-KNOTS = cfg["wall_temperature_profile"]
+KNOTS = cfg.get("wall_temperature_profile")
+EXPERIMENT = cfg.get("experiment_yields_wtpct", {})   # measured outlet yields by formula, wt% of the feed
 
 
-def Tw_of_x(x):
-    """Prescribed wall T [K] at x [m]: knots at position*LENGTH, 'step' or 'linear' to the next knot."""
-    xk = np.array([k["position"] for k in KNOTS]) * LENGTH
-    i = min(max(np.searchsorted(xk, x, side="right") - 1, 0), len(KNOTS) - 1)
-    if i == len(KNOTS) - 1 or KNOTS[i].get("interpolation_to_next", "linear") == "step":
-        return KNOTS[i]["temperature_K"]
+def profile(knots, key, x):
+    """Prescribed value at x [m]: knots at position*LENGTH, 'step' or 'linear' to the next knot."""
+    xk = np.array([k["position"] for k in knots]) * LENGTH
+    i = min(max(np.searchsorted(xk, x, side="right") - 1, 0), len(knots) - 1)
+    if i == len(knots) - 1 or knots[i].get("interpolation_to_next", "linear") == "step":
+        return knots[i][key]
     f = (x - xk[i]) / (xk[i + 1] - xk[i])
-    return KNOTS[i]["temperature_K"] + f * (KNOTS[i + 1]["temperature_K"] - KNOTS[i]["temperature_K"])
+    return knots[i][key] + f * (knots[i + 1][key] - knots[i][key])
 
 
 # _____________________________________________________________
@@ -85,19 +98,24 @@ def Tw_of_x(x):
 #  _____________________________________________________________
 
 class RateNet:
-    """numpy twin of TBLOCK's module ratenet (ratenet_export v1)."""
+    """numpy twin of TBLOCK's module ratenet (ratenet_export v1 and v2; v2: asinh targets, R = r0 sinh(z s + m)).
+    lumps: the model's lump names in its order (13 in hybrid13; 12 in ReactionRateNET v1.1, heavies in aromatics)."""
 
     def __init__(self, fname):
         lines = open(fname).read().split("\n")
+        assert lines[0].strip() in ("ratenet_export v1", "ratenet_export v2"), f"{fname}: not ratenet_export v1 or v2"
+        self.asinh = lines[0].strip() == "ratenet_export v2"
         it = iter(range(len(lines)))
         self.layers, self.chk_in, self.chk_out, self.bounds, self.rbounds, self.yidx, self.rsign = [], [], [], {}, [], [], []
+        self.lumps = []
         sect = None
         for i in it:
             ln = lines[i].strip()
             if not ln:
                 continue
             key = ln.split()[0]
-            if key in ("feature_scaler_mean", "feature_scaler_scale", "target_scaler_mean", "target_scaler_scale"):
+            if key in ("feature_scaler_mean", "feature_scaler_scale", "target_scaler_mean", "target_scaler_scale",
+                       "target_asinh_r0"):
                 setattr(self, key, np.array(lines[i + 1].split(), float)); next(it)
             elif key in ("feature_bounds_min_max", "rate_bounds_min_max", "rate_to_species", "state_cols", "rate_cols"):
                 sect = key
@@ -115,6 +133,8 @@ class RateNet:
                 self.chk_in.append(np.array(lines[i + 1].split(), float)); next(it)
             elif key == "check_out":
                 self.chk_out.append(np.array(lines[i + 1].split(), float)); next(it)
+            elif sect == "state_cols" and key.startswith("Y_lump_chem_"):
+                self.lumps.append(key[12:])
             elif sect == "feature_bounds_min_max":
                 self.bounds[key] = (float(ln.split()[1]), float(ln.split()[2]))
             elif sect == "rate_bounds_min_max":
@@ -124,9 +144,11 @@ class RateNet:
         self.rbounds = np.array(self.rbounds)
         self.tmin = 1.0 / self.bounds["inv_temperature_K"][1]
         self.tmax = 1.0 / self.bounds["inv_temperature_K"][0]
-        # error per output scale: the check vectors are torch float32, so near-zero outputs carry ~1e-4 noise
-        err = np.max(np.abs(self(np.array(self.chk_in)) - self.chk_out) / self.target_scaler_scale)
-        assert err < 1e-3, f"RateNet disagrees with the file's check vectors ({err:.1e} of the output scale)"
+        # v1: error per output scale (the check vectors are torch float32, so near-zero outputs carry ~1e-4 noise);
+        # v2: relative, with the asinh r0 as the floor, as TBLOCK's lump_of_phi.py --self-check
+        out, ref = self(np.array(self.chk_in)), np.array(self.chk_out)
+        err = np.max(np.abs(out - ref) / (np.abs(ref) + self.target_asinh_r0 if self.asinh else self.target_scaler_scale))
+        assert err < 1e-3, f"RateNet disagrees with the file's check vectors ({err:.1e})"
 
     def __call__(self, x):
         h = (np.atleast_2d(x) - self.feature_scaler_mean) / self.feature_scaler_scale
@@ -134,7 +156,8 @@ class RateNet:
             h = h @ w.T + b
             if k < len(self.layers) - 1:
                 h = np.tanh(np.clip(h, -20, 20))
-        return h * self.target_scaler_scale + self.target_scaler_mean
+        z = h * self.target_scaler_scale + self.target_scaler_mean
+        return self.target_asinh_r0 * np.sinh(np.clip(z, -700.0, 700.0)) if self.asinh else z
 
     def rates(self, T, P, rho, Y):
         """omega_k [1/s] per lump as ratenet_tb_omega: envelope clamps, sign, zero-lump guard, sum-zero projection."""
@@ -240,6 +263,15 @@ class Detailed:
         L = Y @ self.lump
         return dict(CONV=1.0 - L[:, 0] / L[0, 0], **{"Y_" + k: L[:, j] for j, k in enumerate(LUMPS)})
 
+    def yields(self, Y):
+        """wt% of the feed by formula, largest first: isomers and radicals are summed, the mechanism names them by index."""
+        out = {}
+        for s, y in zip(self.gas.species(), Y):
+            if s.name != DILUENT:
+                f = "".join(el + (str(int(n)) if n != 1 else "") for el, n in sorted(s.composition.items()))
+                out[f] = out.get(f, 0.0) + 100.0 * y / self.Y0[self.gas.species_index(FEED)]
+        return dict(sorted(out.items(), key=lambda kv: -kv[1]))
+
 
 class Air(Detailed):
     """Cantera air.yaml with its chemistry frozen."""
@@ -261,11 +293,13 @@ class Lumped:
     def __init__(self, folder):
         d = _ROOT / "models" / folder
         self.net = RateNet(str(d / "ratenet.txt"))
-        rows = [ln.split() for ln in open(d / "lump_thermo.txt") if ln.strip().startswith("Y_lump_chem_")][:len(LUMPS)]
-        assert [r[0][12:] for r in rows] == LUMPS, "lump_thermo.txt lump order"
+        self.lumps = self.net.lumps                 # the model's own lumps, feedstock first and diluent last
+        assert (self.lumps[0], self.lumps[-1]) == ("feedstock", "diluent") and set(self.lumps) <= set(LUMPS), self.lumps
+        rows = [ln.split() for ln in open(d / "lump_thermo.txt") if ln.strip().startswith("Y_lump_chem_")][:len(self.lumps)]
+        assert [r[0][12:] for r in rows] == self.lumps, "lump_thermo.txt lump order"
         self.W = np.array([float(r[1]) for r in rows])
         self.a = np.array([[float(v) for v in r[2:8]] for r in rows])     # NASA-7 a1..a6, one range
-        self.Y0 = np.zeros(len(LUMPS))
+        self.Y0 = np.zeros(len(self.lumps))
         self.Y0[0], self.Y0[-1] = 1.0 / (1.0 + STEAM_RATIO), STEAM_RATIO / (1.0 + STEAM_RATIO)
 
     def advance(self, Y, T, p, dt):
@@ -287,7 +321,12 @@ class Lumped:
         raise ValueError("the lump gas has no thermal conductivity: give wall_htc_Wm2K a number, not a correlation")
 
     def columns(self, Y):
-        return dict(CONV=1.0 - Y[:, 0] / Y[0, 0], **{"Y_" + k: Y[:, j] for j, k in enumerate(LUMPS)})
+        return dict(CONV=1.0 - Y[:, 0] / Y[0, 0], **{"Y_" + k: Y[:, j] for j, k in enumerate(self.lumps)})
+
+    def yields(self, Y):
+        """wt% of the feed for the lumps that are one molecule (with its radicals); the other lumps have no formula."""
+        one = {"C6H14": "feedstock", "C2H4": "ethylene", "C3H6": "propylene", "CH4": "methane", "H2": "hydrogen"}
+        return {f: 100.0 * Y[self.lumps.index(k)] / self.Y0[0] for f, k in one.items()}
 
 
 # _____________________________________________________________
@@ -314,30 +353,43 @@ def wall(chem, Y, T, G):
 
 def run(chem):
     x = np.linspace(0.0, LENGTH, N_CELLS + 1)
-    Tw = np.array([Tw_of_x(xi) for xi in x])
-    G = P_0 / (ct.gas_constant * T_0 * np.sum(chem.Y0 / chem.W)) * U_0
-    C = P_0 + G * U_0
-    H = chem.thermo(chem.Y0, T_0)[0] + U_0**2 / 2
-    Y, T, p, u, t, wl = [chem.Y0], [T_0], [P_0], [U_0], [0.0], [wall(chem, chem.Y0, T_0, G)]
+    rho0 = P_0 / (ct.gas_constant * T_0 * np.sum(chem.Y0 / chem.W))
+    u0 = MDOT / (rho0 * AREA) if MDOT else U_0
+    G = rho0 * u0
+    C = P_0 + G * u0
+    H = chem.thermo(chem.Y0, T_0)[0] + u0**2 / 2
+    Y, T, p, u, t, wl = [chem.Y0], [T_0], [P_0], [u0], [0.0], [wall(chem, chem.Y0, T_0, G)]
     for i in range(N_CELLS):
         # ponytail: first order in dx (chemistry, wall heat and friction at the cell-inlet state); raise n_cells to converge
         dx = x[i + 1] - x[i]
         dt = dx / u[-1]
         htc, f, _ = wl[-1]
         Y.append(chem.advance(Y[-1], T[-1], p[-1], dt))
-        H += 4.0 * htc * (Tw_of_x(x[i] + 0.5 * dx) - T[-1]) * dx / (G * DIAMETER)
         C -= f * G * u[-1] / (2.0 * DIAMETER) * dx
         R = ct.gas_constant * np.sum(Y[-1] / chem.W)
-        ui = u[-1]
-        for _ in range(50):                      # h(T(u), Y) + u^2/2 = H with T(u) = u (C - G u) / (G R)
-            Ti = ui * (C - G * ui) / (G * R)
-            h, cp = chem.thermo(Y[-1], Ti)
-            du = -(h + ui**2 / 2 - H) / (cp * (C - 2.0 * G * ui) / (G * R) + ui)
-            ui += du
-            if abs(du) < 1e-10 * ui:
-                break
+        if T_KNOTS:                              # imposed gas T: u from p (imposed) or from momentum, no energy equation
+            Ti = profile(T_KNOTS, "temperature_K", x[i + 1])
+            if P_KNOTS:
+                ui = G * R * Ti / profile(P_KNOTS, "pressure_Pa", x[i + 1])
+                C = G * R * Ti / ui + G * ui     # so that p = C - G u below is the imposed p
+            else:                                # subsonic root of u (C - G u) = G R T
+                disc = C * C - 4.0 * G * G * R * Ti
+                if disc < 0.0:
+                    raise RuntimeError(f"no subsonic state at x = {x[i + 1]:.3f} m (choking): lower the mass flow")
+                ui = (C - np.sqrt(disc)) / (2.0 * G)
+            cp = chem.thermo(Y[-1], Ti)[1]
         else:
-            raise RuntimeError(f"no subsonic state at x = {x[i + 1]:.3f} m (choking): lower inlet_u_ms")
+            H += 4.0 * htc * (profile(KNOTS, "temperature_K", x[i] + 0.5 * dx) - T[-1]) * dx / (G * DIAMETER)
+            ui = u[-1]
+            for _ in range(50):                  # h(T(u), Y) + u^2/2 = H with T(u) = u (C - G u) / (G R)
+                Ti = ui * (C - G * ui) / (G * R)
+                h, cp = chem.thermo(Y[-1], Ti)
+                du = -(h + ui**2 / 2 - H) / (cp * (C - 2.0 * G * ui) / (G * R) + ui)
+                ui += du
+                if abs(du) < 1e-10 * ui:
+                    break
+            else:
+                raise RuntimeError(f"no subsonic state at x = {x[i + 1]:.3f} m (choking): lower inlet_u_ms")
         if ui * ui >= cp / (cp - R) * R * Ti:    # Mach >= 1: past the sonic point (Rayleigh / Fanno)
             raise RuntimeError(f"choking at x = {x[i + 1]:.3f} m: lower inlet_u_ms")
         u.append(ui)
@@ -349,14 +401,19 @@ def run(chem):
     htc, f, Re = np.array(wl).T
     assert np.abs(Y.sum(1) - 1.0).max() < 1e-6, "mass fractions drifted"
 
-    cp = np.array([chem.thermo(Yi, Ti)[1] for Yi, Ti in zip(Y, T)])
+    h, cp = np.array([chem.thermo(Yi, Ti) for Yi, Ti in zip(Y, T)]).T
+    if T_KNOTS:                                  # the heat the wall had to supply; the wall T is not solved
+        Tw, qw = np.full(len(x), np.nan), np.gradient(h + u**2 / 2, x) * G * DIAMETER / 4.0
+    else:
+        Tw = np.array([profile(KNOTS, "temperature_K", xi) for xi in x])
+        qw = htc * (Tw - T)
     W = 1.0 / np.sum(Y / chem.W, axis=1)
     R = ct.gas_constant / W
     gamma = cp / (cp - R)
-    return dict(x_m=x, t_s=t, T_K=T, TW_K=Tw, QW_Wm2=htc * (Tw - T), HTC_Wm2K=htc, RE=Re, F_DARCY=f,
+    return dict(x_m=x, t_s=t, T_K=T, TW_K=Tw, QW_Wm2=qw, HTC_Wm2K=htc, RE=Re, F_DARCY=f,
                 P_Pa=p, U_ms=u, RHO_kgm3=G / u, W_kgkmol=W, CP_JkgK=cp, GAMMA=gamma,
                 MU_Pas=np.array([chem.mu(Yi, Ti) for Yi, Ti in zip(Y, T)]), MACH=u / np.sqrt(gamma * R * T),
-                **chem.columns(Y))
+                **chem.columns(Y)), Y[-1]
 
 
 def loose_ylim(a, ys, rel=0.02, floor=0.0):
@@ -374,16 +431,52 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     stem = CONFIG.stem
     print(f"config {CONFIG}")
-    res = {}
+    res, yld = {}, {}
     for m in MODELS:
         t0 = time.time()
-        res[m] = r = run(Detailed() if m == "cantera" else Air() if m == "air" else Lumped(m))
+        chem = Detailed() if m == "cantera" else Air() if m == "air" else Lumped(m)
+        r, y_out = run(chem)
+        res[m] = r
+        if m != "air":
+            yld[m] = chem.yields(y_out)
         csv = out / f"{stem}_{m}.csv"
         np.savetxt(csv, np.column_stack(list(r.values())), delimiter=",", header=",".join(r), comments="")
         chem = f" | CONV {r['CONV'][-1]:.4f} | C2H4 {r['Y_ethylene'][-1]:.4f}" if "CONV" in r else ""
         print(f"{m:8s} {time.time() - t0:6.1f} s | tau {r['t_s'][-1]*1e3:.2f} ms | T {r['T_K'][-1]:.1f} K | "
               f"p {r['P_Pa'][-1]/1e5:.4f} bar | u {r['U_ms'][-1]:.2f} m/s | M {r['MACH'][-1]:.3f} | "
               f"Re {r['RE'][0]:.3g}-{r['RE'][-1]:.3g} | htc {r['HTC_Wm2K'].mean():.0f} W/m2K{chem} -> {csv.name}")
+
+    if yld:   # outlet yields by formula against the experiment: rows = the measured ones, then the first model's
+        cols = {"experiment": EXPERIMENT, **yld} if EXPERIMENT else yld
+        rows = list(EXPERIMENT) + [k for k in next(iter(yld.values())) if k not in EXPERIMENT]
+        lines = [",".join(["formula", *cols])] + [
+            ",".join([k, *(f"{c[k]:.4f}" if k in c else "" for c in cols.values())]) for k in rows]
+        (out / f"{stem}_yields.csv").write_text("\n".join(lines) + "\n")
+        print("outlet yields, wt% of the feed:")
+        for ln in lines[:1 + (len(EXPERIMENT) or 12)]:
+            print("  " + "".join(f"{v:>12s}" for v in ln.split(",")))
+        print(f"yields -> {stem}_yields.csv")
+        bars = [k for k in rows[:len(EXPERIMENT) or 12] if k != "C6H14"]    # the unconverted feed goes in the title
+        fig, a = plt.subplots(figsize=(11, 4.6), facecolor="#fcfcfb")
+        w = 0.8 / len(cols)
+        for j, (name, c) in enumerate(cols.items()):
+            a.bar(np.arange(len(bars)) + (j - (len(cols) - 1) / 2) * w, [c.get(k, np.nan) for k in bars], 0.88 * w,
+                  color=SERIES[j], label=name)
+        a.set_xticks(np.arange(len(bars)), bars)
+        a.set_ylabel("outlet yield [wt% of the feed]", color="#52514e")
+        a.set_title(f"{stem}: conversion " + ", ".join(f"{n} {100 - c['C6H14']:.1f} %" for n, c in cols.items()
+                                                       if "C6H14" in c), loc="left", color="#0b0b0b")
+        a.set_facecolor("#fcfcfb")
+        a.grid(axis="y", color="#e1e0d9", lw=0.8)
+        a.set_axisbelow(True)
+        for s in ("top", "right", "left"):
+            a.spines[s].set_visible(False)
+        a.spines["bottom"].set_color("#c3c2b7")
+        a.tick_params(colors="#52514e", length=0)
+        a.legend(frameon=False, labelcolor="#0b0b0b")
+        fig.tight_layout()
+        fig.savefig(out / f"{stem}_yields.png", dpi=130)
+        print(f"plot -> {out / (stem + '_yields.png')}")
 
     panels = [("T_K", "T [K] (wall dotted)"), ("P_Pa", "p [Pa]"), ("U_ms", "u [m/s]"),
               ("W_kgkmol", "molar mass [kg/kmol]"), ("CP_JkgK", "cp [J/kg/K]"), ("GAMMA", "gamma [-]"),
@@ -403,7 +496,7 @@ def main():
     if HTC != 0:
         ax[0, 0].plot(res[MODELS[0]]["t_s"] * 1e3, res[MODELS[0]]["TW_K"], "k:", label="wall")
     ax[0, 0].legend(frameon=False)
-    fig.suptitle(f"{stem}: T0 {T_0:.0f} K, p0 {P_0/1e5:.2f} bar, u0 {U_0:.0f} m/s, L {LENGTH} m, D {DIAMETER*1e3:.0f} mm, "
+    fig.suptitle(f"{stem}: T0 {T_0:.0f} K, p0 {P_0/1e5:.2f} bar, u0 {res[MODELS[0]]['U_ms'][0]:.0f} m/s, L {LENGTH} m, D {DIAMETER*1e3:.0f} mm, "
                  f"htc {HTC}, friction {'on' if FRICTION else 'off'}, {N_CELLS} cells")
     fig.tight_layout()
     fig.savefig(out / f"{stem}.png", dpi=130)
@@ -414,11 +507,12 @@ def main():
     fig, ax = plt.subplots(3, 5, figsize=(20, 10))
     for a, k in zip(ax.flat, LUMPS):
         for m, ls in zip(MODELS, ("-", "--", "-.", ":")):
-            a.plot(res[m]["x_m"], res[m]["Y_" + k], ls, label=m)
+            if "Y_" + k in res[m]:                # a 12-lump model has no heavies (they are in its aromatics)
+                a.plot(res[m]["x_m"], res[m]["Y_" + k], ls, label=m)
         a.set(xlabel="x [m]", title="Y " + k)
         a.grid(alpha=0.3)
         a.ticklabel_format(axis="y", useOffset=False)
-        top = max(res[m]["Y_" + k].max() for m in MODELS)
+        top = max(res[m]["Y_" + k].max() for m in MODELS if "Y_" + k in res[m])
         a.set_ylim(0.0, max(1.1 * top, 1e-3))     # mass fractions from 0, at least 0.001 tall
     for a in ax.flat[len(LUMPS):]:
         a.axis("off")
